@@ -22,6 +22,6 @@ See the [Wiki](https://github.com/OpenAcousticDevices/AudioMoth-Firmware-Basic/w
 
 ### License ###
 
-Copyright 2017 [Open Acoustic Devices](http://www.openacousticdevices.info/).
+Copyright 2023 [Open Acoustic Devices](http://www.openacousticdevices.info/).
 
 [MIT license](http://www.openacousticdevices.info/license).
