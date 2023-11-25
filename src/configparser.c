@@ -1,5 +1,5 @@
 /****************************************************************************
- * configParser.c
+ * configparser.c
  * openacousticdevices.info
  * October 2022
  *****************************************************************************/
@@ -11,11 +11,9 @@
 
 #define MAX_BUFFER_LENGTH       32
 
-/* Useful macros */
+/* Custom time constants */
 
-#define MAX(a,b)                (((a) > (b)) ? (a) : (b))
-
-#define MIN(a,b)                (((a) < (b)) ? (a) : (b))
+#define MINUTES_IN_HOUR         60
 
 /* Structure to maintain state */
 
@@ -29,6 +27,7 @@ typedef struct {
     char character;
     uint32_t line;
     uint32_t position;
+    bool comment;
 } CP_parserState_t;
 
 /* Macro definitions for updating state */
@@ -62,7 +61,7 @@ typedef struct {
 /* Private macro definition for defining jump table functions */
 
 #define _FUNCTION_START(NAME, NUMBER) \
-void NAME ## NUMBER (char c, CP_parserState_t *state, CP_configSettings_t *configSettings) {state->character = c; state->position += 1; if (c == '\n') {state->line += 1; state->position = 0;}; if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {} else
+void NAME ## NUMBER (char c, CP_parserState_t *state, CP_configSettings_t *configSettings) {state->character = c; state->position += 1; if (c == '#') {state->comment = true;}; if (c == '\n') {state->comment = false; state->line += 1; state->position = 0;}; if (state->comment == true || c == ' ' || c == '\t' || c == '\n' || c == '\r') {} else
 
 #define _FUNCTION_END(STATE, STATUS) \
 {state->state = STATE; state->status = STATUS;} }
@@ -97,65 +96,6 @@ _FUNCTION_START(NAME, NUMBER) {char* pattern = STRING; uint32_t length = strlen(
 
 #define ISNUMBER (ISDIGIT || IS('-'))
 
-/* Macro definitions for error cases */
-
-#define VALUE_ERROR \
-state->state = 0; state->status = CP_VALUE_ERROR
-
-/* Custom time constants */
-
-#define MINUTES_IN_HOUR                 60
-#define SECONDS_IN_HOUR                 3600
-#define MINUTES_IN_DAY                  1440
-#define MINUTES_IN_SIX_HOURS            (60 * 60)
-#define SECONDS_IN_DAY                  (1440 * 60)
-
-#define MAXIMUM_DURATION                MINUTES_IN_DAY
-#define MAXIMUM_START_MINUTES           (MINUTES_IN_DAY - 1)
-
-#define MONTH_JAN                       1
-#define MONTH_FEB                       2
-#define MONTH_DEC                       12
-
-#define DAYS_IN_YEAR                    365
-#define UNIX_EPOCH_START                1970
-
-/* Custom variables */
-
-static uint32_t day, month, year, timestamp;
-
-static const uint32_t daysInMonth[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-/* Custom function to check configuration */
-
-static inline bool isLeapYear(uint32_t year) {
-
-    return (year & 3) == 0 && ((year % 25) != 0 || (year & 15) == 0);
-
-}
-
-static inline bool checkDate() {
-
-    timestamp = 0;
-
-    if (month < MONTH_JAN || month > MONTH_DEC) return false;
-
-    uint32_t dayInCurrentMonth = daysInMonth[month - 1] + (month == MONTH_FEB && isLeapYear(year) ? 1 : 0);
-
-    if (day == 0 || day > dayInCurrentMonth) return false;
-
-    for (uint32_t y = UNIX_EPOCH_START; y < year; y += 1) timestamp += SECONDS_IN_DAY * (isLeapYear(y) ? DAYS_IN_YEAR + 1 : DAYS_IN_YEAR);
-
-    for (uint32_t m = 0; m < month - 1; m += 1) timestamp += SECONDS_IN_DAY * daysInMonth[m];
-
-    if (isLeapYear(year) && month > MONTH_FEB) timestamp += SECONDS_IN_DAY;
-
-    timestamp += SECONDS_IN_DAY * (day - 1);
-
-    return true;
-
-}
-
 /* Define jump table functions for configuration settings */
 /* Must use CLEAR_BUFFER before DEFINE_FUNCTION_STRG or ADD_TO_BUFFER functionality */
 
@@ -163,7 +103,7 @@ DEFINE_FUNCTION_INIT(CP, 00, IS('{'))
 DEFINE_FUNCTION_STRG(CP, 01, "gain:", INC_STATE)
 DEFINE_FUNCTION_STEP(CP, 02, IS('0') || IS('1') || IS('2') || IS('3') || IS('4'), configSettings->gain = VALUE; CLEAR_BUFFER; INC_STATE)
 DEFINE_FUNCTION_STRG(CP, 03, ",sampleRate:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 04, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sampleRate = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 04, COUNT < 6 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sampleRate = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
 DEFINE_FUNCTION_STRG(CP, 05, "enableDailyFolders:", INC_STATE)
 DEFINE_FUNCTION_STEP(CP, 06, IS('0') || IS('1'), configSettings->enableDailyFolders = VALUE; CLEAR_BUFFER; INC_STATE)
 DEFINE_FUNCTION_STRG(CP, 07, ",enableLowGainRange:", INC_STATE)
@@ -175,69 +115,79 @@ DEFINE_FUNCTION_STEP(CP, 12, IS('0') || IS('1'), configSettings->disable48HzDCBl
 DEFINE_FUNCTION_STRG(CP, 13, ",enableAlternativeBatteryVoltageRange:", INC_STATE)
 DEFINE_FUNCTION_STEP(CP, 14, IS('0') || IS('1'), configSettings->batteryLevelDisplayType = VALUE == 1 ? NIMH_LIPO_BATTERY_VOLTAGE : BATTERY_LEVEL; CLEAR_BUFFER; INC_STATE)
 DEFINE_FUNCTION_STRG(CP, 15, ",initialFixDuration:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 16, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->initialFixDuration = MIN(SECONDS_IN_HOUR, atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 16, COUNT < 4 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->initialFixDuration = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
 DEFINE_FUNCTION_STRG(CP, 17, "intervalToNextFixAttempt:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 18, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->intervalToNextFixAttempt = MIN(SECONDS_IN_HOUR, atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 18, COUNT < 4 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->intervalToNextFixAttempt = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
 DEFINE_FUNCTION_STRG(CP, 19, "recordingFixDuration:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 20, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->recordingFixDuration = MIN(SECONDS_IN_HOUR, atoi(BUFFER)); INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 21, IS('s'), configSettings->useFixedRecordingPeriods = false; CLEAR_BUFFER; ADD_STATE(17), IS('r'), configSettings->useFixedRecordingPeriods = true; CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 22, "ecordingPeriods:[", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 23, "{startTime:\"", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 24, IS('0') || IS('1') || IS('2'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 25, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].startMinutes = MINUTES_IN_HOUR * atoi(BUFFER); INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 26, IS(':'), CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 27, IS('0') || IS('1') || IS('2') || IS('3') || IS('4') || IS('5'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 28, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].startMinutes = MIN(MAXIMUM_START_MINUTES, configSettings->recordingPeriods[INDEX].startMinutes + atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 29, "\",stopTime:\"", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 30, IS('0') || IS('1') || IS('2'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 31, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].durationMinutes = MINUTES_IN_HOUR * atoi(BUFFER); INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 32, IS(':'), CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 33, IS('0') || IS('1') || IS('2') || IS('3') || IS('4') || IS('5'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 34, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].durationMinutes += atoi(BUFFER); if (configSettings->recordingPeriods[INDEX].durationMinutes <= configSettings->recordingPeriods[INDEX].startMinutes) configSettings->recordingPeriods[INDEX].durationMinutes += MINUTES_IN_DAY; configSettings->recordingPeriods[INDEX].durationMinutes -= configSettings->recordingPeriods[INDEX].startMinutes; CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 35, "\"}", INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 36, IS(',') && INDEX < (MAX_RECORDING_PERIODS - 1), INC_INDEX; CLEAR_BUFFER; SUB_STATE(13), IS(']'), configSettings->activeRecordingPeriods = INDEX + 1; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 37, IS('}'), SET_STATUS_SUCCESS, IS(','), ADD_STATE(17))
-DEFINE_FUNCTION_STRG(CP, 38, "unRecording:{sunRecordingMode:", INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 39, IS('0') || IS('1') || IS('2') | IS('3') || IS('4'), configSettings->sunRecordingMode = VALUE; CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 40, ",sunRoundingMinutes:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 41, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sunRoundingMinutes = MIN(MINUTES_IN_HOUR, atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 42, "sunriseInterval:{", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 43, "beforeMinutes:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 44, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sunriseInterval.beforeMinutes = (uint32_t)MIN(MINUTES_IN_SIX_HOURS, atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 45, "afterMinutes:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 46, ISDIGIT, ADD_TO_BUFFER, IS('}'), configSettings->sunriseInterval.afterMinutes = (uint32_t)MIN(MINUTES_IN_SIX_HOURS, atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 47, ",sunsetInterval:{", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 48, "beforeMinutes:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 49, ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sunsetInterval.beforeMinutes = (uint32_t)MIN(MINUTES_IN_SIX_HOURS, atoi(BUFFER)); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 50, "afterMinutes:", CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 51, ISDIGIT, ADD_TO_BUFFER, IS('}'), configSettings->sunsetInterval.afterMinutes = (uint32_t)MIN(MINUTES_IN_SIX_HOURS, atoi(BUFFER)); INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 52, IS('}'), INC_STATE);
-DEFINE_FUNCTION_ELSE(CP, 53, IS('}'), SET_STATUS_SUCCESS, IS(','), INC_STATE);
-DEFINE_FUNCTION_ELSE(CP, 54, IS('f'), INC_STATE; CLEAR_BUFFER, IS('l'), CLEAR_BUFFER; ADD_STATE(13))
-DEFINE_FUNCTION_STRG(CP, 55, "irstRecordingDate:", INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 56, IS('\"'), INC_STATE; CLEAR_BUFFER)
-DEFINE_FUNCTION_STEP(CP, 57, IS('0') || IS('1') || IS('2') || IS('3'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 58, ISDIGIT, ADD_TO_BUFFER; day = atoi(BUFFER); INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 59, IS('/'), INC_STATE; CLEAR_BUFFER)
-DEFINE_FUNCTION_STEP(CP, 60, IS('0') || IS('1'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 61, ISDIGIT, ADD_TO_BUFFER; month = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 62, "/202", INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 63, ISDIGIT, year = 2020 + VALUE; if (checkDate()) {configSettings->earliestRecordingTime = timestamp; INC_STATE;} else {VALUE_ERROR;})
-DEFINE_FUNCTION_STEP(CP, 64, IS('\"'), INC_STATE)
-DEFINE_FUNCTION_ELSE(CP, 65, IS('}'), SET_STATUS_SUCCESS, IS(','), INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 66, IS('l'), INC_STATE; CLEAR_BUFFER)
-DEFINE_FUNCTION_STRG(CP, 67, "astRecordingDate:", INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 68, IS('\"'), INC_STATE; CLEAR_BUFFER)
-DEFINE_FUNCTION_STEP(CP, 69, IS('0') || IS('1') || IS('2') || IS('3'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 70, ISDIGIT, ADD_TO_BUFFER; day = atoi(BUFFER); INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 71, IS('/'), INC_STATE; CLEAR_BUFFER)
-DEFINE_FUNCTION_STEP(CP, 72, IS('0') || IS('1'), ADD_TO_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 73, ISDIGIT, ADD_TO_BUFFER; month = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
-DEFINE_FUNCTION_STRG(CP, 74, "/202", INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 75, ISDIGIT, year = 2020 + VALUE; if (checkDate()) {configSettings->latestRecordingTime = timestamp + SECONDS_IN_DAY; INC_STATE;} else {VALUE_ERROR;})
-DEFINE_FUNCTION_STEP(CP, 76, IS('\"'), INC_STATE)
-DEFINE_FUNCTION_STEP(CP, 77, IS('}'), SET_STATUS_SUCCESS)
-
+DEFINE_FUNCTION_ELSE(CP, 20, COUNT < 4 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->recordingFixDuration = atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 21, IS('s'), INC_STATE, IS('r'), configSettings->disableSleepRecordCycle = true; configSettings->useFixedRecordingPeriods = true; CLEAR_BUFFER; ADD_STATE(8))
+DEFINE_FUNCTION_ELSE(CP, 22, IS('l'), CLEAR_BUFFER; INC_STATE, IS('u'), configSettings->disableSleepRecordCycle = true; CLEAR_BUFFER; ADD_STATE(27))
+DEFINE_FUNCTION_STRG(CP, 23, "eepRecordCycle:{sleepDuration:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 24, COUNT < 4 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sleepDuration = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 25, "recordDuration:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 26, COUNT < 4 && ISDIGIT, ADD_TO_BUFFER, IS('}'), configSettings->recordDuration = atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 27, IS(','), INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 28, IS('s'), ADD_STATE(20), IS('r'), configSettings->useFixedRecordingPeriods = true; CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 29, "ecordingPeriods:[", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 30, "{startTime:\"", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 31, IS('0') || IS('1') || IS('2'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 32, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].startMinutes = MINUTES_IN_HOUR * atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 33, IS(':'), CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 34, IS('0') || IS('1') || IS('2') || IS('3') || IS('4') || IS('5'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 35, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].startMinutes += atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 36, "\",", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 37, IS('s'), CLEAR_BUFFER; INC_STATE, IS('e'), CLEAR_BUFFER; ADD_STATE(2));
+DEFINE_FUNCTION_STRG(CP, 38, "topTime:\"", CLEAR_BUFFER; ADD_STATE(2));
+DEFINE_FUNCTION_STRG(CP, 39, "ndTime:\"", CLEAR_BUFFER; INC_STATE);
+DEFINE_FUNCTION_STEP(CP, 40, IS('0') || IS('1') || IS('2'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 41, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].endMinutes = MINUTES_IN_HOUR * atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 42, IS(':'), CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 43, IS('0') || IS('1') || IS('2') || IS('3') || IS('4') || IS('5'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 44, ISDIGIT, ADD_TO_BUFFER; configSettings->recordingPeriods[INDEX].endMinutes += atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 45, "\"}", INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 46, IS(',') && INDEX < (MAX_RECORDING_PERIODS - 1), INC_INDEX; CLEAR_BUFFER; SUB_STATE(16), IS(']'), configSettings->activeRecordingPeriods = INDEX + 1; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 47, IS('}'), SET_STATUS_SUCCESS, IS(','), ADD_STATE(18))
+DEFINE_FUNCTION_STEP(CP, 48, IS('u'), CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 49, "nRecording:{sunRecordingMode:", INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 50, IS('0') || IS('1') || IS('2') | IS('3') || IS('4'), configSettings->sunRecordingMode = VALUE; CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 51, ",sunRoundingMinutes:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 52, COUNT < 2 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sunRoundingMinutes = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 53, "sunriseInterval:{", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 54, "beforeMinutes:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 55, COUNT < 3 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sunriseInterval.beforeMinutes = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 56, "afterMinutes:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 57, COUNT < 3 && ISDIGIT, ADD_TO_BUFFER, IS('}'), configSettings->sunriseInterval.afterMinutes = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 58, ",sunsetInterval:{", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 59, "beforeMinutes:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 60, COUNT < 3 && ISDIGIT, ADD_TO_BUFFER, IS(','), configSettings->sunsetInterval.beforeMinutes = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 61, "afterMinutes:", CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 62, COUNT < 3 && ISDIGIT, ADD_TO_BUFFER, IS('}'), configSettings->sunsetInterval.afterMinutes = atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 63, IS('}'), INC_STATE);
+DEFINE_FUNCTION_ELSE(CP, 64, IS('}'), SET_STATUS_SUCCESS, IS(','), INC_STATE);
+DEFINE_FUNCTION_ELSE(CP, 65, IS('f'), INC_STATE; CLEAR_BUFFER, IS('l'), CLEAR_BUFFER; ADD_STATE(13))
+DEFINE_FUNCTION_STRG(CP, 66, "irstRecordingDate:", configSettings->firstRecordingDate = true; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 67, IS('\"'), INC_STATE; CLEAR_BUFFER)
+DEFINE_FUNCTION_STEP(CP, 68, IS('0') || IS('1') || IS('2') || IS('3'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 69, ISDIGIT, ADD_TO_BUFFER; configSettings->firstRecordingDay = atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 70, IS('/'), INC_STATE; CLEAR_BUFFER)
+DEFINE_FUNCTION_STEP(CP, 71, IS('0') || IS('1'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 72, ISDIGIT, ADD_TO_BUFFER; configSettings->firstRecordingMonth = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 73, "/202", INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 74, ISDIGIT, configSettings->firstRecordingYear = 2020 + VALUE; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 75, IS('\"'), INC_STATE)
+DEFINE_FUNCTION_ELSE(CP, 76, IS('}'), SET_STATUS_SUCCESS, IS(','), INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 77, IS('l'), INC_STATE; CLEAR_BUFFER)
+DEFINE_FUNCTION_STRG(CP, 78, "astRecordingDate:", configSettings->lastRecordingDate = true; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 79, IS('\"'), INC_STATE; CLEAR_BUFFER)
+DEFINE_FUNCTION_STEP(CP, 80, IS('0') || IS('1') || IS('2') || IS('3'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 81, ISDIGIT, ADD_TO_BUFFER; configSettings->lastRecordingDay = atoi(BUFFER); INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 82, IS('/'), INC_STATE; CLEAR_BUFFER)
+DEFINE_FUNCTION_STEP(CP, 83, IS('0') || IS('1'), ADD_TO_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 84, ISDIGIT, ADD_TO_BUFFER; configSettings->lastRecordingMonth = atoi(BUFFER); CLEAR_BUFFER; INC_STATE)
+DEFINE_FUNCTION_STRG(CP, 85, "/202", INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 86, ISDIGIT, configSettings->lastRecordingYear = 2020 + VALUE; INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 87, IS('\"'), INC_STATE)
+DEFINE_FUNCTION_STEP(CP, 88, IS('}'), SET_STATUS_SUCCESS)
 
 static void (*CPfunctions[])(char, CP_parserState_t*, CP_configSettings_t*) = {CP00, CP01, CP02, CP03, CP04, CP05, CP06, CP07, \
                                                                                CP08, CP09, CP10, CP11, CP12, CP13, CP14, CP15, \
@@ -248,7 +198,9 @@ static void (*CPfunctions[])(char, CP_parserState_t*, CP_configSettings_t*) = {C
                                                                                CP48, CP49, CP50, CP51, CP52, CP53, CP54, CP55, \
                                                                                CP56, CP57, CP58, CP59, CP60, CP61, CP62, CP63, \
                                                                                CP64, CP65, CP66, CP67, CP68, CP69, CP70, CP71, \
-                                                                               CP72, CP73, CP74, CP75, CP76, CP77};
+                                                                               CP72, CP73, CP74, CP75, CP76, CP77, CP78, CP79, \
+                                                                               CP80, CP81, CP82, CP83, CP84, CP85, CP86, CP87, \
+                                                                               CP88};
 
 /* Define parser */
 
