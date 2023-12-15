@@ -3,6 +3,8 @@ Additional firmware for AudioMoth devices to generate WAV files synchronised wit
 
 For more details, visit [AudioMoth GPS Sync](https://www.openacousticdevices.info/gps-sync).
 
+Compatible with the [AudioMoth GPS Sync App](https://github.com/OpenAcousticDevices/AudioMoth-GPS-Sync-App).
+
 ### Usage ####
 
 Clone the contents of [AudioMoth-Project](https://github.com/OpenAcousticDevices/AudioMoth-Project).
