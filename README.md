@@ -1,7 +1,7 @@
 # AudioMoth-GPS-Sync
 Additional firmware for AudioMoth devices to generate WAV files synchronised with GPS time.
 
-For more details, visit [AudioMoth Labs](https://www.openacousticdevices.info/labs).
+For more details, visit [AudioMoth GPS Sync](https://www.openacousticdevices.info/gps-sync).
 
 ### Usage ####
 
