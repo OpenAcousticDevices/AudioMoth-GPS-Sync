@@ -16,11 +16,6 @@ INC = ../cmsis ../device/inc ../emlib/inc ../emusb/inc ../drivers/inc ../fatfs/i
 SRC = ../device/src ../emlib/src ../emusb/src ../drivers/src ../fatfs/src  ../gps/src ../src
 ```
 
-
-### Documentation ####
-
-See the [Wiki](https://github.com/OpenAcousticDevices/AudioMoth-Firmware-Basic/wiki/AudioMoth) for detailed description of the example code.
-
 ### License ###
 
 Copyright 2023 [Open Acoustic Devices](http://www.openacousticdevices.info/).
