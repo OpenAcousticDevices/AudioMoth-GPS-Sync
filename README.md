@@ -16,7 +16,6 @@ INC = ../cmsis ../device/inc ../emlib/inc ../emusb/inc ../drivers/inc ../fatfs/i
 SRC = ../device/src ../emlib/src ../emusb/src ../drivers/src ../fatfs/src  ../gps/src ../src
 ```
 
-If building from the command line tools no further changes are necessary. However, if building using Simplicity Studio, make sure that the new ```/gps/``` folder appears in the project files, and then open the project 'Properties' under the 'File' menu, navigate to the 'Linker' and 'Ordering' and make sure that the standard math library '-lm' is at the bottom of the list.
 
 ### Documentation ####
 
