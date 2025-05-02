@@ -69,15 +69,17 @@
 
 /* File constants */
 
-#define FILENAME_LENGTH                         64
+#define FILENAME_LENGTH                         128
+#define GUANO_BUFFER_LENGTH                     1024
+
 #define LAST_RMC_BUFFER_LENGTH                  128
 #define FILE_WRITE_BUFFER_LENGTH                256
 #define FILE_READ_BUFFER_LENGTH                 512
-#define MAX_FILE_READ_CHARACTERS                1024
+#define MAX_FILE_READ_CHARACTERS                (1024 * 1024)
 
 #define NUMBER_OF_BYTES_IN_SAMPLE               2
 
-#define MAXIMUM_WAV_FILE_SIZE                   (UINT32_MAX - 1)
+#define MAXIMUM_WAV_DATA_SIZE                   (UINT32_MAX - 16 * 1024 * 1024)
 
 /* Microphone constants */
 
@@ -108,6 +110,10 @@
 #define START_OF_CENTURY                        946684800
 #define MIDPOINT_OF_CENTURY                     2524608000
 
+/* Useful type constants */
+
+#define UINT32_SIZE_IN_BYTES                    4
+
 /* Sunrise and sunset constant */
 
 #define MAXIMUM_SUNRISE_SUNSET_SHIFT            300
@@ -131,12 +137,17 @@
 #define LOW_DC_BLOCKING_FREQ                    8
 #define DEFAULT_DC_BLOCKING_FREQ                48
 
-/* WAV header constant */
+/* WAV header constants */
 
 #define PCM_FORMAT                              1
 #define RIFF_ID_LENGTH                          4
 #define LENGTH_OF_ARTIST                        32
 #define LENGTH_OF_COMMENT                       384
+
+/* GPS constants */
+
+#define MINUTES_IN_DEGREE                       60
+#define GPS_LOCATION_PRECISION                  1000000
 
 /* Useful macro */
 
@@ -274,12 +285,12 @@ static wavHeader_t wavHeader = {
     .data = {.id = "data", .size = 0}
 };
 
-void setHeaderDetails(uint32_t sampleRate, uint32_t numberOfSamples) {
+static void setHeaderDetails(wavHeader_t *wavHeader, uint32_t sampleRate, uint32_t numberOfSamples, uint32_t guanoDataSize) {
 
-    wavHeader.wavFormat.samplesPerSecond = sampleRate;
-    wavHeader.wavFormat.bytesPerSecond = 2 * sampleRate;
-    wavHeader.data.size = 2 * numberOfSamples;
-    wavHeader.riff.size = 2 * numberOfSamples + sizeof(wavHeader_t) - sizeof(chunk_t);
+    wavHeader->wavFormat.samplesPerSecond = sampleRate;
+    wavHeader->wavFormat.bytesPerSecond = NUMBER_OF_BYTES_IN_SAMPLE * sampleRate;
+    wavHeader->data.size = NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples;
+    wavHeader->riff.size = NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples + sizeof(wavHeader_t) + guanoDataSize - sizeof(chunk_t);
 
 }
 
@@ -363,6 +374,72 @@ static void setHeaderComment(wavHeader_t *wavHeader, CP_configSettings_t *config
 
 }
 
+/* Function to write the GUANO data */
+
+static uint32_t writeGuanoData(char *buffer, CP_configSettings_t *configSettings, uint32_t currentTime, int32_t *gpsLastFixLatitude, int32_t *gpsLastFixLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, char *filename, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature) {
+    
+    uint32_t length = sprintf(buffer, "guan") + UINT32_SIZE_IN_BYTES;
+
+    /* General information */
+    
+    length += sprintf(buffer + length, "GUANO|Version:1.0\nMake:Open Acoustic Devices\nModel:AudioMoth\nSerial:" SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(serialNumber));
+
+    length += sprintf(buffer + length, "Firmware Version:%s (%u.%u.%u)\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
+
+    /* Timestamp */
+
+    time_t rawTime = currentTime;
+
+    struct tm time;
+
+    gmtime_r(&rawTime, &time);
+
+    length += sprintf(buffer + length, "Timestamp:%04d-%02d-%02dT%02d:%02d:%02d", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+
+    length += sprintf(buffer + length, "Z\n");
+
+    /* Location position and source */
+
+    char *latitudeSign = *gpsLastFixLatitude < 0 ? "-" : "";
+
+    char *longitudeSign = *gpsLastFixLongitude < 0 ? "-" : "";
+
+    length += sprintf(buffer + length, "Loc Position:%s%ld.%06ld %s%ld.%06ld\nOAD|Loc Source:GPS\n", latitudeSign, ABS(*gpsLastFixLatitude) / GPS_LOCATION_PRECISION, ABS(*gpsLastFixLatitude) % GPS_LOCATION_PRECISION, longitudeSign, ABS(*gpsLastFixLongitude) / GPS_LOCATION_PRECISION, ABS(*gpsLastFixLongitude) % GPS_LOCATION_PRECISION);
+
+    /* Filename */
+
+    char *start = strchr(filename, '/');
+
+    length += sprintf(buffer + length, "Original Filename:%s\n", start ? start + 1 : filename);
+
+    /* Recording settings */
+
+    length += sprintf(buffer + length, "OAD|Recording Settings:%lu GAIN %u", configSettings->sampleRate, configSettings->gain);
+
+    if (configSettings->enableLowGainRange) length += sprintf(buffer + length, " LGR");
+
+    if (configSettings->disable48HzDCBlockingFilter) length += sprintf(buffer + length, " D48");
+
+    /* Battery and temperature */
+
+    uint32_t batteryVoltage = extendedBatteryState == AM_EXT_BAT_LOW ? 24 : extendedBatteryState >= AM_EXT_BAT_FULL ? 50 : extendedBatteryState + AM_EXT_BAT_STATE_OFFSET / AM_BATTERY_STATE_INCREMENT;
+
+    length += sprintf(buffer + length, "\nOAD|Battery Voltage:%01lu.%01lu\n", batteryVoltage / 10, batteryVoltage % 10);
+    
+    char *temperatureSign = temperature < 0 ? "-" : "";
+
+    uint32_t temperatureInDecidegrees = ROUNDED_DIV(ABS(temperature), 100);
+
+    length += sprintf(buffer + length, "Temperature Int:%s%lu.%lu", temperatureSign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
+
+    /* Set GUANO chunk size */
+
+    *(uint32_t*)(buffer + RIFF_ID_LENGTH) = length - sizeof(chunk_t);;
+
+    return length;
+
+}
+
 /* Configuration data structure */
 
 static CP_configSettings_t tempConfigSettings;
@@ -371,27 +448,31 @@ static float *latitude = (float*)(AM_BACKUP_DOMAIN_START_ADDRESS);
 
 static float *longitude = (float*)(AM_BACKUP_DOMAIN_START_ADDRESS + 4);
 
-static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
+static int32_t *gpsLastFixLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
 
-static uint32_t *previousSwitchPosition = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
+static int32_t *gpsLastFixLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
 
-static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
+static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
 
-static uint32_t *currentAcquisitionState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
+static uint32_t *previousSwitchPosition = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
 
-static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 24);
+static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 24);
 
-static uint32_t *timeOfNextInitalGPSAttempt = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 28);
+static uint32_t *currentAcquisitionState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 28);
 
-static uint32_t *timeOfNextSunriseAndSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
+static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
 
-static uint32_t *previousRecordingState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+static uint32_t *timeOfNextInitalGPSAttempt = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
 
-static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
+static uint32_t *timeOfNextSunriseAndSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
+
+static uint32_t *previousRecordingState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
+
+static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 1, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 0};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-GPS-Sync";
 
@@ -461,8 +542,6 @@ static uint32_t sunsetMinutes;
 
 static NMEA_parserResultRMC_t parserResultRMC;
 
-static NMEA_parserResultRMC_t tempParserResultRMC;
-
 /* File variables */
 
 static FIL filePPS;
@@ -496,6 +575,10 @@ static char logBuffer[LOG_BUFFER_LENGTH];
 /* Temporary buffer */
 
 static char buffer[LOG_BUFFER_LENGTH];
+
+/* GUANO buffer */
+
+static char guanoBuffer[GUANO_BUFFER_LENGTH];
 
 /* File read variables */
 
@@ -769,6 +852,22 @@ static bool isMagneticSwitchClosed() {
 
 }
 
+/* GPS format conversion */
+
+static int32_t convertToDecimalDegrees(uint32_t degrees, uint32_t minutes, uint32_t tenThousandths, char direction) {
+
+    int32_t value = degrees * GPS_LOCATION_PRECISION;
+
+    value += ROUNDED_DIV(minutes * GPS_LOCATION_PRECISION, MINUTES_IN_DEGREE);
+
+    value += ROUNDED_DIV(tenThousandths * (GPS_LOCATION_PRECISION / 10000), MINUTES_IN_DEGREE); 
+
+    if (direction == 'S' || direction == 'W') value *= -1;
+
+    return value;
+
+}
+
 /* Function to acquire GPS time */
 
 static AM_fixState_t setTimeFromGPS(uint32_t timeout, uint32_t *acquisitionTime) {
@@ -973,13 +1072,19 @@ static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentT
 
             /* Determine sunrise and sunset time */
 
+            static char* eventTypes[4] = {"", " civil", " nautical", " astronomical"};
+
+            char *sunriseEvent = configSettings->sunRecordingEvent == SR_SUNRISE_AND_SUNSET ? "sunrise" : "dawn";
+
+            char *sunsetEvent = configSettings->sunRecordingEvent == SR_SUNRISE_AND_SUNSET ? "sunset" : "dusk";
+
             bool success = determineSunriseAndSunsetTimes(scheduleTime);
 
             if (success) {
 
                 if (LOG) {
 
-                    sprintf(fileWriteBuffer, "Calculated sunrise time is %02lu:%02lu UTC and sunset time is %02lu:%02lu UTC.", sunriseMinutes / 60, sunriseMinutes % 60, sunsetMinutes / 60, sunsetMinutes % 60);
+                    sprintf(fileWriteBuffer, "Calculated%s %s is %02lu:%02lu UTC and %s is %02lu:%02lu UTC.", eventTypes[configSettings->sunRecordingEvent], sunriseEvent, sunriseMinutes / 60, sunriseMinutes % 60, sunsetEvent, sunsetMinutes / 60, sunsetMinutes % 60);
 
                     writeLog(currentTime, fileWriteBuffer);
 
@@ -987,7 +1092,13 @@ static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentT
 
             } else {
 
-                if (LOG) writeLog(currentTime, "Could not determine sunrise and sunset time.");
+                if (LOG) {
+                    
+                    sprintf(fileWriteBuffer, "Could not determine%s %s and %s times.", eventTypes[configSettings->sunRecordingEvent], sunriseEvent, sunsetEvent);
+
+                    writeLog(currentTime, fileWriteBuffer);
+
+                }
 
             }
 
@@ -1051,6 +1162,12 @@ static void generateFilename(uint32_t timestamp, char *foldername, char *extensi
 
     uint32_t length = foldername ? sprintf(filename, "%s/", foldername) : 0;
 
+    if (configSettings->enableFilenameWithDeviceID) {
+
+        length += sprintf(filename + length, SERIAL_NUMBER "_", FORMAT_SERIAL_NUMBER(AM_UNIQUE_ID_START_ADDRESS));
+
+    }
+
     length += sprintf(filename + length, "%04d%02d%02d_%02d%02d%02d", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
  
     strcpy(filename + length, extension);
@@ -1101,6 +1218,10 @@ int main(void) {
 
         *longitude = 0.0f;
 
+        *gpsLastFixLatitude = 0;
+
+        *gpsLastFixLongitude = 0;
+    
         *timeOfNextRecording = 0;
  
         *durationOfNextRecording = 0;
@@ -1418,6 +1539,10 @@ int main(void) {
             GPSUtilities_getLatitude(&parserResultRMC, latitude);
 
             GPSUtilities_getLongitude(&parserResultRMC, longitude);
+
+            *gpsLastFixLatitude = convertToDecimalDegrees(parserResultRMC.latitudeDegrees, parserResultRMC.latitudeMinutes, parserResultRMC.latitudeTenThousandths, parserResultRMC.latitudeDirection);
+
+            *gpsLastFixLongitude = convertToDecimalDegrees(parserResultRMC.longitudeDegrees, parserResultRMC.longitudeMinutes, parserResultRMC.longitudeTenThousandths, parserResultRMC.longitudeDirection);        
 
             /* Report success */
 
@@ -2171,7 +2296,7 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     /* Calculate recording parameters */
 
-    uint32_t maximumNumberOfSeconds = (MAXIMUM_WAV_FILE_SIZE - sizeof(wavHeader)) / NUMBER_OF_BYTES_IN_SAMPLE / sampleRate;
+    uint32_t maximumNumberOfSeconds = MAXIMUM_WAV_DATA_SIZE / NUMBER_OF_BYTES_IN_SAMPLE / sampleRate;
 
     bool fileSizeLimited = (duration > maximumNumberOfSeconds);
 
@@ -2288,24 +2413,6 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
                                          fileSizeLimited ? FILE_SIZE_LIMITED :
                                          RECORDING_OKAY;
 
-    /* Write the samples header */
-
-    AudioMoth_setRedLED(true);
-
-    setHeaderDetails(sampleRate, samplesWritten);
-
-    setHeaderComment(&wavHeader, configSettings, *recordingStartTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, extendedBatteryState, temperature, externalMicrophone, recordingState);
-
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_lseek(&fileSAMPLES, 0));
-
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, &wavHeader, sizeof(wavHeader), &bw));
-
-    /* Close the files */
-
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&filePPS));
-
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&fileSAMPLES));
-
     /* Generate filenames from recording start time */
 
     if (configSettings->enableDailyFolders) {
@@ -2321,6 +2428,30 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
     generateFilename(*recordingStartTime, configSettings->enableDailyFolders ? foldername : NULL, ".CSV", filenamePPS);
 
     generateFilename(*recordingStartTime, configSettings->enableDailyFolders ? foldername : NULL, ".WAV", filenameSAMPLES);
+
+    /* Write the GUANO data */
+
+    uint32_t guanoDataSize = writeGuanoData(guanoBuffer, configSettings, *recordingStartTime, gpsLastFixLatitude, gpsLastFixLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, filenameSAMPLES, extendedBatteryState, temperature);
+
+    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, guanoBuffer, guanoDataSize, &bw));
+
+    /* Write the samples header */
+
+    AudioMoth_setRedLED(true);
+
+    setHeaderDetails(&wavHeader, sampleRate, samplesWritten, guanoDataSize);
+
+    setHeaderComment(&wavHeader, configSettings, *recordingStartTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, extendedBatteryState, temperature, externalMicrophone, recordingState);
+
+    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_lseek(&fileSAMPLES, 0));
+
+    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, &wavHeader, sizeof(wavHeader), &bw));
+
+    /* Close the files */
+
+    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&filePPS));
+
+    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&fileSAMPLES));
 
     /* Rename the files */
 
@@ -2346,31 +2477,19 @@ static bool determineSunriseAndSunsetTimes(uint32_t currentTime) {
 
     }
 
-    /* Calculate the fractional year */
-
-    float gamma;
-
-    time_t rawTime = currentTime;
-
-    struct tm *time = gmtime(&rawTime);
-
-    tempParserResultRMC.day = time->tm_mday;
-    
-    tempParserResultRMC.month = MONTH_OFFSET + time->tm_mon;
-
-    tempParserResultRMC.year = YEAR_OFFSET + time->tm_year;
-
-    GPSUtilities_getFractionalYearInRadians(&tempParserResultRMC, &gamma);
-
     /* Copy configuration settings from backup domain to local copy */
 
     copyFromBackupDomain((uint8_t*)&tempConfigSettings, (uint32_t*)configSettings, sizeof(CP_configSettings_t));
 
     /* Determine sunrise and sunset times */
 
-    bool success = GPSUtilities_calculateSunsetAndSunrise(gamma, *latitude, *longitude, &sunriseMinutes, &sunsetMinutes);
+    SR_trend_t trend;
 
-    if (success) {
+    SR_solution_t solution;
+
+    Sunrise_calculateFromUnix(configSettings->sunRecordingEvent, currentTime, *latitude, *longitude, &solution, &trend, &sunriseMinutes, &sunsetMinutes);
+
+    if (solution == SR_NORMAL_SOLUTION) {
 
         /* Round the sunrise and sunset times */
 
@@ -2506,7 +2625,7 @@ static bool determineSunriseAndSunsetTimes(uint32_t currentTime) {
 
     copyToBackupDomain((uint32_t*)configSettings, (uint8_t*)&tempConfigSettings, sizeof(CP_configSettings_t));
 
-    return success;
+    return solution == SR_NORMAL_SOLUTION;
 
 }
 

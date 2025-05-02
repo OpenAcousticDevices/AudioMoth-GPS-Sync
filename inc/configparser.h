@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "sunrise.h"
+
 #define MAX_RECORDING_PERIODS 10
 
 typedef enum {CP_WAITING, CP_PARSING, CP_CHARACTER_ERROR, CP_SUCCESS} CP_parserStatus_t;
@@ -32,6 +34,7 @@ typedef struct {
     uint8_t gain;
     uint32_t sampleRate;
     bool enableDailyFolders;
+    bool enableFilenameWithDeviceID;
     bool enableLowGainRange;
     bool enableMagneticSwitch;
     bool disable48HzDCBlockingFilter;
@@ -46,6 +49,7 @@ typedef struct {
     bool useFixedRecordingPeriods;
     CP_recordingPeriod_t recordingPeriods[MAX_RECORDING_PERIODS];
     CP_sunRecordingMode_t sunRecordingMode;
+    SR_event_t sunRecordingEvent;
     uint32_t sunRoundingMinutes;
     CP_interval_t sunriseInterval;
     CP_interval_t sunsetInterval;
