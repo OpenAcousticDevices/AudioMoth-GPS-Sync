@@ -149,6 +149,8 @@
 #define MINUTES_IN_DEGREE                       60
 #define GPS_LOCATION_PRECISION                  1000000
 
+#define MINIMUM_GPS_POWER_DOWN_TIME             4
+
 /* Useful macro */
 
 #define FLASH_LED(led, duration) { \
@@ -468,11 +470,13 @@ static uint32_t *timeOfNextSunriseAndSunsetCalculation = (uint32_t*)(AM_BACKUP_D
 
 static uint32_t *previousRecordingState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
 
-static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
+static uint32_t *lastPowerDownTimeOfGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
+
+static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 1};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-GPS-Sync";
 
@@ -1004,9 +1008,9 @@ static AM_fixState_t setTimeFromGPS(uint32_t timeout, uint32_t *acquisitionTime)
 
 static void writeDeviceInformation() {
 
-    if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
+    if (fileSystemEnabled == false) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
 
-    if (!fileSystemEnabled) return;
+    if (fileSystemEnabled == false) return;
 
     RETURN_ON_FALSE(AudioMoth_openFile(deviceInfoFilename));
 
@@ -1028,9 +1032,9 @@ static void writeDeviceInformation() {
 
 static void writeLog(uint32_t currentTime, char *message) {
 
-    if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
+    if (fileSystemEnabled == false) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
 
-    if (!fileSystemEnabled) return;
+    if (fileSystemEnabled == false) return;
 
     RETURN_ON_FALSE(AudioMoth_appendFile(logFilename));
 
@@ -1223,7 +1227,9 @@ int main(void) {
         *gpsLastFixLongitude = 0;
     
         *timeOfNextRecording = 0;
- 
+
+        *lastPowerDownTimeOfGPS = 0;
+
         *durationOfNextRecording = 0;
 
         *timeOfNextInitalGPSAttempt = 0;
@@ -1316,7 +1322,7 @@ int main(void) {
 
         bool fileOpened = false;
 
-        if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
+        if (fileSystemEnabled == false) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
         
         if (fileSystemEnabled) fileOpened = AudioMoth_openFileToRead("SETTINGS.TXT");
 
@@ -1471,6 +1477,18 @@ int main(void) {
     int64_t timeToEarliestEvent = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)configSettings->recordingFixDuration * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
 
     if (*currentAcquisitionState == RECORDING && timeToEarliestEvent < 0) {
+
+        /* Check minimum GPS power down time */
+
+        if (*lastPowerDownTimeOfGPS + MINIMUM_GPS_POWER_DOWN_TIME > currentTime) {
+
+            uint32_t seconds = *lastPowerDownTimeOfGPS + MINIMUM_GPS_POWER_DOWN_TIME - currentTime;
+
+            AudioMoth_powerDownAndWakeMilliseconds(seconds * MILLISECONDS_IN_SECOND);
+
+        }
+
+        /* Generate warning from previous recording */
 
         if (*previousRecordingState != RECORDING_OKAY) {
 
@@ -1762,6 +1780,8 @@ int main(void) {
 
         /* Disable the GPS interface and power down the GPS */
 
+        AudioMoth_getTime(lastPowerDownTimeOfGPS, NULL);
+
         AudioMoth_setBothLED(false);
 
         GPSInterface_disable();
@@ -1791,6 +1811,18 @@ int main(void) {
     /* Set time and read position from GPS */
     
     if (*currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX && currentTime >= *timeOfNextInitalGPSAttempt) {
+
+        /* Check minimum GPS power down time */
+
+        if (*lastPowerDownTimeOfGPS + MINIMUM_GPS_POWER_DOWN_TIME > currentTime) {
+
+            uint32_t seconds = *lastPowerDownTimeOfGPS + MINIMUM_GPS_POWER_DOWN_TIME - currentTime;
+
+            AudioMoth_powerDownAndWakeMilliseconds(seconds * MILLISECONDS_IN_SECOND);
+
+        }
+
+        /* Update log */
 
         if (LOG) writeLog(currentTime, "Acquiring initial GPS fix.");
 
@@ -1871,6 +1903,8 @@ int main(void) {
         }
 
         /* Disable the GPS interface and power down the GPS */
+
+        AudioMoth_getTime(lastPowerDownTimeOfGPS, NULL);
 
         AudioMoth_setBothLED(false);
 
@@ -2118,9 +2152,9 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     /* Enable file system */
 
-    if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
+    if (fileSystemEnabled == false) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
 
-    if (!fileSystemEnabled) return SDCARD_WRITE_ERROR;
+    if (fileSystemEnabled == false) return SDCARD_WRITE_ERROR;
 
     /* Open files */
 
@@ -2166,6 +2200,8 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     uint32_t currentTime = 0;
 
+    bool supplyVoltageLow = false;
+
     bool cancelledBySwitch = false;
 
     bool cancelledByMagnet = false;
@@ -2200,7 +2236,9 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
         }
 
-        /* Check for cancellation from magnetic or position switch */
+        /* Check for cancellation from magnetic, position switch, or low supply voltage */
+
+        supplyVoltageLow = AudioMoth_isSupplyAboveThreshold() == false;
 
         cancelledBySwitch = AudioMoth_getSwitchPosition() == AM_SWITCH_USB;
 
@@ -2216,13 +2254,17 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     /* Wait for recording to start */
 
-    bool supplyVoltageLow = false;
-
-    while (!recording && !supplyVoltageLow && currentTime < startTime + duration) {
-
-        supplyVoltageLow = !AudioMoth_isSupplyAboveThreshold();
+    while (!recording && !supplyVoltageLow && !microphoneChanged && !cancelledBySwitch && !cancelledByMagnet && currentTime < startTime + duration) {
 
         AudioMoth_getTime(&currentTime, NULL);
+
+        /* Check for cancellation from magnetic, position switch, or low supply voltage */
+
+        supplyVoltageLow = AudioMoth_isSupplyAboveThreshold() == false;
+
+        cancelledBySwitch = AudioMoth_getSwitchPosition() == AM_SWITCH_USB;
+
+        cancelledByMagnet = configSettings->enableMagneticSwitch && isMagneticSwitchClosed();
 
         /* Feed watch dog and sleep */
 
@@ -2238,7 +2280,7 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     /* Check if cancelled or timed out */
 
-    if (microphoneChanged || cancelledBySwitch || cancelledByMagnet || supplyVoltageLow || !recording) {
+    if (!recording || supplyVoltageLow || microphoneChanged || cancelledBySwitch || cancelledByMagnet) {
 
         AudioMoth_setGreenLED(false);
 
@@ -2260,7 +2302,7 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     if (cancelledByMagnet) return CANCELLED_BEFORE_START_BY_MAGNET;
 
-    if (!recording) return START_TIMEOUT;
+    if (recording == false) return START_TIMEOUT;
 
     /* Calculate time that the recording actually started and update duration */
 
@@ -2388,7 +2430,7 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
         cancelledByMagnet = configSettings->enableMagneticSwitch && isMagneticSwitchClosed();
 
-        supplyVoltageLow = !AudioMoth_isSupplyAboveThreshold();
+        supplyVoltageLow = AudioMoth_isSupplyAboveThreshold() == false;
 
         /* Feed watch dog and sleep */
 
