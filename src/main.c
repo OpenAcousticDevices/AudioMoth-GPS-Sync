@@ -38,8 +38,8 @@
 
 /* GPS fix constants */
 
-#define MINIMUM_VALID_PPS_TO_SET_TIME           5
-#define MINIMUM_VALID_RMC_TO_SET_TIME           5
+#define MINIMUM_VALID_PPS_TO_SET_TIME           4
+#define MINIMUM_VALID_RMC_TO_SET_TIME           4
 
 #define GPS_TICK_EVENTS_PER_SECOND              12
 
@@ -223,7 +223,7 @@ typedef enum {SUCCESS, CANCELLED_BY_SWITCH, CANCELLED_BY_MAGNET, TIMEOUT} AM_fix
 
 /* Device state enumeration */
 
-typedef enum {RESET, WAITING_FOR_INITIAL_CONFIG, WAITING_FOR_MAGNETIC_TRIGGER_BEFORE_INITIAL_GPS_FIX, WAITING_FOR_INITIAL_GPS_FIX, WAITING_FOR_MAGNETIC_TRIGGER_BEFORE_RECORDING, RECORDING, POWER_DOWN_AFTER_RECORDING, POWER_DOWN_AFTER_RECORDING_CANCELLED_BY_MAGNETIC_SWITCH} AM_acquisitionState_t;
+typedef enum {RESET, WAITING_FOR_INITIAL_CONFIG, WAITING_FOR_MAGNETIC_TRIGGER_BEFORE_INITIAL_GPS_FIX, WAITING_FOR_INITIAL_GPS_FIX, WAITING_FOR_INITIAL_GPS_FIX_AFTER_GPS_TIMED_OUT, WAITING_FOR_MAGNETIC_TRIGGER_BEFORE_RECORDING, RECORDING, RECORDING_AFTER_GPS_TIMED_OUT, POWER_DOWN_AFTER_RECORDING, POWER_DOWN_AFTER_RECORDING_WHERE_GPS_TIMED_OUT, POWER_DOWN_AFTER_RECORDING_CANCELLED_BY_MAGNETIC_SWITCH} AM_acquisitionState_t;
 
 /* Recording state enumeration */
 
@@ -476,7 +476,7 @@ static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DO
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 2};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-GPS-Sync";
 
@@ -630,7 +630,7 @@ static BW_filterCoefficients_t dcFilterCoefficients;
 
 /* Required time zone handler */
 
-inline void AudioMoth_timezoneRequested(int8_t *timezoneHours, int8_t *timezoneMinutes) { }
+inline void AudioMoth_timezoneRequested(int32_t *timezoneHours, int32_t *timezoneMinutes) { }
 
 /* Required interrupt handlers */
 
@@ -912,7 +912,7 @@ static AM_fixState_t setTimeFromGPS(uint32_t timeout, uint32_t *acquisitionTime)
 
                 validRMC += 1;
 
-                if (validRMC > MINIMUM_VALID_RMC_TO_SET_TIME) {
+                if (validRMC >= MINIMUM_VALID_RMC_TO_SET_TIME) {
 
                     uint32_t timestampInRMC;
 
@@ -950,7 +950,7 @@ static AM_fixState_t setTimeFromGPS(uint32_t timeout, uint32_t *acquisitionTime)
 
                 validPPS += 1;
 
-                if (validPPS > MINIMUM_VALID_PPS_TO_SET_TIME && timeToBeSetOnNextPPS > 0) {
+                if (validPPS >= MINIMUM_VALID_PPS_TO_SET_TIME && timeToBeSetOnNextPPS > 0) {
 
                     AudioMoth_setTime(timeToBeSetOnNextPPS, 0);
 
@@ -1476,7 +1476,9 @@ int main(void) {
 
     int64_t timeToEarliestEvent = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)configSettings->recordingFixDuration * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
 
-    if (*currentAcquisitionState == RECORDING && timeToEarliestEvent < 0) {
+    if (*currentAcquisitionState == RECORDING_AFTER_GPS_TIMED_OUT) timeToEarliestEvent += (int64_t)configSettings->recordingFixDuration * MILLISECONDS_IN_SECOND;
+
+    if ((*currentAcquisitionState == RECORDING || *currentAcquisitionState == RECORDING_AFTER_GPS_TIMED_OUT) && timeToEarliestEvent < 0) {
 
         /* Check minimum GPS power down time */
 
@@ -1484,7 +1486,7 @@ int main(void) {
 
             uint32_t seconds = *lastPowerDownTimeOfGPS + MINIMUM_GPS_POWER_DOWN_TIME - currentTime;
 
-            AudioMoth_powerDownAndWakeMilliseconds(seconds * MILLISECONDS_IN_SECOND);
+            SAVE_SWITCH_POSITION_AND_POWER_DOWN(seconds * MILLISECONDS_IN_SECOND);
 
         }
 
@@ -1512,7 +1514,13 @@ int main(void) {
 
         uint32_t acquisitionTime;
 
-        AM_fixState_t state = setTimeFromGPS(*timeOfNextRecording + *durationOfNextRecording, &acquisitionTime);
+        uint32_t timeout = currentTime + configSettings->recordingFixDuration;
+
+        if (*currentAcquisitionState == RECORDING_AFTER_GPS_TIMED_OUT) timeout += configSettings->recordingFixDuration;
+
+        if (switchPosition == AM_SWITCH_CUSTOM) timeout = MIN(timeout, *timeOfNextRecording + *durationOfNextRecording);
+
+        AM_fixState_t state = setTimeFromGPS(timeout, &acquisitionTime);
 
         AudioMoth_getTime(&currentTime, &currentMilliseconds);
 
@@ -1548,7 +1556,33 @@ int main(void) {
 
             if (LOG) writeLog(currentTime, "Failed to acquire recording GPS fix.");
 
-            *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING;
+            uint32_t updatedTimeOfNextRecording = currentTime + configSettings->intervalToNextFixAttempt;
+
+            if (switchPosition == AM_SWITCH_DEFAULT) {
+
+                /* Update the recording start time */
+
+                *timeOfNextRecording = updatedTimeOfNextRecording;
+
+                *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING_WHERE_GPS_TIMED_OUT;
+
+            } else if (updatedTimeOfNextRecording < *timeOfNextRecording + *durationOfNextRecording) {
+
+                /* Update the recording start time and reduce the duration */
+
+                *durationOfNextRecording = *timeOfNextRecording + *durationOfNextRecording - updatedTimeOfNextRecording;
+
+                *timeOfNextRecording = updatedTimeOfNextRecording;
+
+                *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING_WHERE_GPS_TIMED_OUT;
+
+            } else {
+
+                /* Skip to the next scheduled recording */
+
+                *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING;
+
+            }
 
         } else {
 
@@ -1614,10 +1648,10 @@ int main(void) {
 
                     if (LOG) writeLog(currentTime, "Recording cancelled before start of recording due to microphone change.");           
 
+                    *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING;
+
                     retryImmediately = true;
 
-                    *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING;
-                    
                 } else if (recordingState == CANCELLED_BEFORE_START_BY_SWITCH) {
 
                     if (LOG) writeLog(currentTime, "Recording cancelled before start of recording due to change of switch position.");
@@ -1656,9 +1690,9 @@ int main(void) {
 
                     }
 
-                    retryImmediately = true;
-
                     *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING;
+
+                    retryImmediately = true;
 
                 } else if (recordingState == CANCELLED_DURING_RECORDING_BY_SWITCH) {
 
@@ -1726,9 +1760,9 @@ int main(void) {
 
                     }
 
-                    retryImmediately = true;
-
                     *currentAcquisitionState = POWER_DOWN_AFTER_RECORDING;
+
+                    retryImmediately = true;
 
                 } else if (recordingState == START_TIMEOUT) {
 
@@ -1810,7 +1844,7 @@ int main(void) {
 
     /* Set time and read position from GPS */
     
-    if (*currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX && currentTime >= *timeOfNextInitalGPSAttempt) {
+    if ((*currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX || *currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX_AFTER_GPS_TIMED_OUT) && currentTime >= *timeOfNextInitalGPSAttempt) {
 
         /* Check minimum GPS power down time */
 
@@ -1818,7 +1852,7 @@ int main(void) {
 
             uint32_t seconds = *lastPowerDownTimeOfGPS + MINIMUM_GPS_POWER_DOWN_TIME - currentTime;
 
-            AudioMoth_powerDownAndWakeMilliseconds(seconds * MILLISECONDS_IN_SECOND);
+            SAVE_SWITCH_POSITION_AND_POWER_DOWN(seconds * MILLISECONDS_IN_SECOND);
 
         }
 
@@ -1838,7 +1872,11 @@ int main(void) {
 
         uint32_t acquisitionTime;
 
-        AM_fixState_t state = setTimeFromGPS(currentTime + configSettings->initialFixDuration, &acquisitionTime);
+        uint32_t fixDuration = configSettings->initialFixDuration;
+
+        if (*currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX_AFTER_GPS_TIMED_OUT) fixDuration *= 2;
+
+        AM_fixState_t state = setTimeFromGPS(currentTime + fixDuration, &acquisitionTime);
 
         AudioMoth_getTime(&currentTime, &currentMilliseconds);
 
@@ -1900,6 +1938,8 @@ int main(void) {
 
             *timeOfNextInitalGPSAttempt = currentTime + configSettings->intervalToNextFixAttempt;
 
+            *currentAcquisitionState = WAITING_FOR_INITIAL_GPS_FIX_AFTER_GPS_TIMED_OUT;
+
         }
 
         /* Disable the GPS interface and power down the GPS */
@@ -1922,15 +1962,15 @@ int main(void) {
 
     } else if (*currentAcquisitionState == WAITING_FOR_INITIAL_CONFIG) {
 
-        SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);        
+        SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);
 
-    } else if (*currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX) {
+    } else if (*currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX || *currentAcquisitionState == WAITING_FOR_INITIAL_GPS_FIX_AFTER_GPS_TIMED_OUT) {
 
         if (configSettings->enableMagneticSwitch && isMagneticSwitchClosed()) {
 
             if (LOG) writeLog(currentTime, "Reverting to waiting for magnetic trigger.");
 
-            FLASH_REPEAT_LED(Red, MAGNETIC_SWITCH_CHANGE_FLASHES, SHORT_LED_FLASH_DURATION);     
+            FLASH_REPEAT_LED(Red, MAGNETIC_SWITCH_CHANGE_FLASHES, SHORT_LED_FLASH_DURATION);
 
             *currentAcquisitionState = WAITING_FOR_MAGNETIC_TRIGGER_BEFORE_INITIAL_GPS_FIX;
 
@@ -1947,6 +1987,12 @@ int main(void) {
         *currentAcquisitionState = RECORDING;
 
         SAVE_SWITCH_POSITION_AND_POWER_DOWN(SHORT_WAIT_INTERVAL);     
+
+    } else if (*currentAcquisitionState == POWER_DOWN_AFTER_RECORDING_WHERE_GPS_TIMED_OUT) {
+
+        *currentAcquisitionState = RECORDING_AFTER_GPS_TIMED_OUT;
+
+        SAVE_SWITCH_POSITION_AND_POWER_DOWN(SHORT_WAIT_INTERVAL);  
 
     } else if (*currentAcquisitionState == POWER_DOWN_AFTER_RECORDING_CANCELLED_BY_MAGNETIC_SWITCH) {
 
@@ -2060,6 +2106,8 @@ int main(void) {
 
             timeToEarliestEvent = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)configSettings->recordingFixDuration * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
            
+            if (*currentAcquisitionState == RECORDING_AFTER_GPS_TIMED_OUT) timeToEarliestEvent += (int64_t)configSettings->recordingFixDuration * MILLISECONDS_IN_SECOND;
+
         }
 
         /* Flash LED */
