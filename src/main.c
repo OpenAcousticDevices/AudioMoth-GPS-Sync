@@ -130,7 +130,7 @@
 
 /* Recording error constant */
 
-#define MAXIMUM_NUMBER_OF_RECORDING_ERRORS      5
+#define MAX_CONSECUTIVE_RECORDING_ERRORS        5
 
 /* DC filter constants */
 
@@ -188,10 +188,11 @@
     } \
 }
 
-#define TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(fn) { \
+#define TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(fn) { \
     FRESULT res = (fn); \
     if (res != FR_OK) { \
         AudioMoth_setBothLED(false); \
+        AudioMoth_pauseSDCardClock(); \
         return SDCARD_WRITE_ERROR; \
     } \
 }
@@ -464,19 +465,21 @@ static uint32_t *currentAcquisitionState = (uint32_t*)(AM_BACKUP_DOMAIN_START_AD
 
 static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
 
-static uint32_t *timeOfNextInitalGPSAttempt = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+static uint32_t *numberOfConsecutiveRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
 
-static uint32_t *timeOfNextSunriseAndSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
+static uint32_t *timeOfNextInitalGPSAttempt = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
 
-static uint32_t *previousRecordingState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
+static uint32_t *timeOfNextSunriseAndSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
 
-static uint32_t *lastPowerDownTimeOfGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
+static uint32_t *previousRecordingState = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
 
-static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
+static uint32_t *lastPowerDownTimeOfGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
+
+static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 56);
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 2};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 3};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-GPS-Sync";
 
@@ -1238,6 +1241,8 @@ int main(void) {
 
         *numberOfRecordingErrors = 0;
 
+        *numberOfConsecutiveRecordingErrors = 0;
+
         *previousRecordingState = RECORDING_OKAY;
 
         *timeOfNextSunriseAndSunsetCalculation = 0;
@@ -1305,6 +1310,8 @@ int main(void) {
         }
 
         *numberOfRecordingErrors = 0;
+
+        *numberOfConsecutiveRecordingErrors = 0;
 
         *previousRecordingState = RECORDING_OKAY;
 
@@ -1808,6 +1815,12 @@ int main(void) {
 
                 *numberOfRecordingErrors += 1;
 
+                *numberOfConsecutiveRecordingErrors += 1;
+
+            } else {
+
+                *numberOfConsecutiveRecordingErrors = 0;
+
             }
 
         }
@@ -1824,7 +1837,7 @@ int main(void) {
 
         /* Schedule next recording period, ignoring the rest of the current one */
 
-        if (*numberOfRecordingErrors >= MAXIMUM_NUMBER_OF_RECORDING_ERRORS) {
+        if (*numberOfConsecutiveRecordingErrors >= MAX_CONSECUTIVE_RECORDING_ERRORS) {
 
             if (LOG) writeLog(currentTime, "Recording schedule stopped due to repeated recording failures.");
 
@@ -2192,7 +2205,7 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     AM_gainRange_t gainRange = configSettings->enableLowGainRange ? AM_LOW_GAIN_RANGE : AM_NORMAL_GAIN_RANGE;
 
-    bool externalMicrophone = AudioMoth_enableMicrophone(gainRange, configSettings->gain, CLOCK_DIVIDER, ACQUISITION_CYCLES, overSampleRate);
+    AM_externalMicrophone_t externalMicrophone = AudioMoth_enableMicrophone(gainRange, configSettings->gain, CLOCK_DIVIDER, ACQUISITION_CYCLES, overSampleRate);
 
     AudioMoth_initialiseMicrophoneInterrupts();
 
@@ -2200,23 +2213,33 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     /* Enable file system */
 
-    if (fileSystemEnabled == false) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
+    if (fileSystemEnabled == false) {
+        
+        fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_HIGH_SPEED);
 
-    if (fileSystemEnabled == false) return SDCARD_WRITE_ERROR;
+        if (fileSystemEnabled == false) return SDCARD_WRITE_ERROR;
+
+    } else {
+
+        AudioMoth_restartSDCardClock();
+
+    }
 
     /* Open files */
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_open(&filePPS, "PPS.CSV",  FA_CREATE_ALWAYS | FA_WRITE));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_open(&filePPS, "PPS.CSV",  FA_CREATE_ALWAYS | FA_WRITE));
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_open(&fileSAMPLES, "SAMPLES.WAV",  FA_CREATE_ALWAYS | FA_WRITE));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_open(&fileSAMPLES, "SAMPLES.WAV",  FA_CREATE_ALWAYS | FA_WRITE));
 
     /* Write headers */
 
     uint32_t length = sprintf(fileWriteBuffer, "PPS_NUMBER,AUDIOMOTH_TIME,SAMPLES,TOTAL_SAMPLES,TIMER_COUNT,BUFFERS_FILLED,BUFFERS_WRITTEN,LAST_RMC_AUDIOMOTH_TIME,LAST_RMC_GPS_TIME,STATUS,LAT_DEG,LAT_MIN,LAT_DIR,LONG_DEG,LONG_MIN,LONG_DIR\r\n");
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&filePPS, fileWriteBuffer, length, &bw));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&filePPS, fileWriteBuffer, length, &bw));
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, &wavHeader, sizeof(wavHeader), &bw));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, &wavHeader, sizeof(wavHeader), &bw));
+
+    AudioMoth_pauseSDCardClock();
 
     /* Initialise sample counters  */
 
@@ -2334,9 +2357,13 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
         toggleGreenLED = false;
 
+        AudioMoth_restartSDCardClock();
+
         f_close(&fileSAMPLES);
 
         f_close(&filePPS);
+
+        AudioMoth_pauseSDCardClock();
 
     }
     
@@ -2410,7 +2437,11 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
             uint32_t length = sprintf(fileWriteBuffer, "%lu,%04d-%02d-%02dT%02d:%02d:%02d.%03lu,%lu,%lu,%lu,%lu,%lu,%s\r\n", ppsCount, YEAR_OFFSET + time->tm_year, MONTH_OFFSET + time->tm_mon, time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec, currentPPSMilliSeconds, sampleCountInLastSecond, lastSampleCount, currentPPSMicrophoneCounter, writeBufferCount, readBufferCount, string);
             
-            TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&filePPS, fileWriteBuffer, length, &bw));
+            AudioMoth_restartSDCardClock();
+
+            TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&filePPS, fileWriteBuffer, length, &bw));
+
+            AudioMoth_pauseSDCardClock();
 
             /* Update counter */
 
@@ -2460,7 +2491,11 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
             uint32_t numberOfSamples = MIN(NUMBER_OF_SAMPLES_IN_BUFFER, samplesToWrite - samplesWritten);
 
-            TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, buffers[readBuffer], 2 * numberOfSamples, &bw));
+            AudioMoth_restartSDCardClock();
+
+            TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, buffers[readBuffer], 2 * numberOfSamples, &bw));
+
+            AudioMoth_pauseSDCardClock();
 
             readBuffer = (readBuffer + 1) & (NUMBER_OF_BUFFERS - 1);
 
@@ -2523,7 +2558,11 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     uint32_t guanoDataSize = writeGuanoData(guanoBuffer, configSettings, *recordingStartTime, gpsLastFixLatitude, gpsLastFixLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, filenameSAMPLES, extendedBatteryState, temperature);
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, guanoBuffer, guanoDataSize, &bw));
+    AudioMoth_restartSDCardClock();
+
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, guanoBuffer, guanoDataSize, &bw));
+
+    AudioMoth_pauseSDCardClock();
 
     /* Write the samples header */
 
@@ -2531,17 +2570,21 @@ static AM_recordingState_t makeRecording(uint32_t startTime, uint32_t duration, 
 
     setHeaderDetails(&wavHeader, sampleRate, samplesWritten, guanoDataSize);
 
-    setHeaderComment(&wavHeader, configSettings, *recordingStartTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, extendedBatteryState, temperature, externalMicrophone, recordingState);
+    setHeaderComment(&wavHeader, configSettings, *recordingStartTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, extendedBatteryState, temperature, externalMicrophone == AM_EXTERNAL_PRESENT_AND_USED, recordingState);
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_lseek(&fileSAMPLES, 0));
+    AudioMoth_restartSDCardClock();
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, &wavHeader, sizeof(wavHeader), &bw));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_lseek(&fileSAMPLES, 0));
+
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_write(&fileSAMPLES, &wavHeader, sizeof(wavHeader), &bw));
 
     /* Close the files */
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&filePPS));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&filePPS));
 
-    TURN_LED_OFF_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&fileSAMPLES));
+    TURN_LED_OFF_AND_PAUSE_SD_CARD_CLOCK_AND_RETURN_ERROR_ON_FILE_ERROR(f_close(&fileSAMPLES));
+
+    AudioMoth_pauseSDCardClock();
 
     /* Rename the files */
 
