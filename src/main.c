@@ -202,10 +202,6 @@
     AudioMoth_powerDownAndWakeMilliseconds(milliseconds); \
 }
 
-#define SERIAL_NUMBER                           "%08X%08X"
-
-#define FORMAT_SERIAL_NUMBER(src)               (unsigned int)*((uint32_t*)src + 1),  (unsigned int)*((uint32_t*)src)
-
 #define ABS(a)                                  ((a) < (0) ? (-a) : (a))
 
 #define MAX(a,b)                                (((a) > (b)) ? (a) : (b))
@@ -307,7 +303,7 @@ static void setHeaderComment(wavHeader_t *wavHeader, CP_configSettings_t *config
 
     char *artist = wavHeader->iart.artist;
 
-    sprintf(artist, "AudioMoth " SERIAL_NUMBER, FORMAT_SERIAL_NUMBER(serialNumber));
+    sprintf(artist, "AudioMoth " AM_SERIAL_NUMBER, AM_FORMAT_SERIAL_NUMBER(serialNumber));
 
     /* Format comment field */
 
@@ -385,7 +381,7 @@ static uint32_t writeGuanoData(char *buffer, CP_configSettings_t *configSettings
 
     /* General information */
     
-    length += sprintf(buffer + length, "GUANO|Version:1.0\nMake:Open Acoustic Devices\nModel:AudioMoth\nSerial:" SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(serialNumber));
+    length += sprintf(buffer + length, "GUANO|Version:1.0\nMake:Open Acoustic Devices\nModel:AudioMoth\nSerial:" AM_SERIAL_NUMBER "\n", AM_FORMAT_SERIAL_NUMBER(serialNumber));
 
     length += sprintf(buffer + length, "Firmware Version:%s (%u.%u.%u)\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
 
@@ -479,7 +475,7 @@ static CP_configSettings_t *configSettings = (CP_configSettings_t*)(AM_BACKUP_DO
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 3};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 5};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-GPS-Sync";
 
@@ -1171,7 +1167,7 @@ static void generateFilename(uint32_t timestamp, char *foldername, char *extensi
 
     if (configSettings->enableFilenameWithDeviceID) {
 
-        length += sprintf(filename + length, SERIAL_NUMBER "_", FORMAT_SERIAL_NUMBER(AM_UNIQUE_ID_START_ADDRESS));
+        length += sprintf(filename + length, AM_SERIAL_NUMBER "_", AM_FORMAT_SERIAL_NUMBER(AM_UNIQUE_ID_START_ADDRESS));
 
     }
 
